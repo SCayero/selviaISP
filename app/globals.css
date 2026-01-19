@@ -1,26 +1,36 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Selvia Design Tokens */
+  --bg: #FAFAFD;
+  --card: #FFFFFF;
+  --text: #0F412A;
+  --muted: rgba(15, 65, 42, 0.65);
+  --border: rgba(15, 65, 42, 0.12);
+  --primary: #87E7B0;
+  --primary-hover: #41C77A;
+  --accent: #FF8659;
+  --radius: 8px;
+  --shadow: rgba(0, 0, 0, 0.1) 0px 2px 4px 0px;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-bg: var(--bg);
+  --color-card: var(--card);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-hover: var(--primary-hover);
+  --color-accent: var(--accent);
+  --radius-lg: var(--radius);
+  --shadow-soft: var(--shadow);
+  --font-sans: var(--font-onest);
+  --font-family-sans: var(--font-onest), system-ui, sans-serif;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-onest), system-ui, sans-serif;
 }
