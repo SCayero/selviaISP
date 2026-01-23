@@ -1,30 +1,49 @@
 /**
  * Date and time utility functions for Selvia ISP Calculator
  * All functions work with ISO date strings (YYYY-MM-DD)
+ * All date arithmetic uses LOCAL calendar days, not UTC
  */
+
+/**
+ * Parse ISO date string to local date components
+ */
+function parseISO(isoDate: string): { year: number; month: number; day: number } {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  return { year, month: month - 1, day }; // month is 0-indexed for Date constructor
+}
+
+/**
+ * Format Date to ISO string using local timezone
+ */
+function toLocalISOString(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
 /**
  * Get today's date as ISO string (YYYY-MM-DD)
  */
 export function getTodayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  return toLocalISOString(new Date());
 }
 
 /**
  * Add days to an ISO date string
  */
 export function addDays(isoDate: string, days: number): string {
-  const date = new Date(isoDate + "T00:00:00");
-  date.setDate(date.getDate() + days);
-  return date.toISOString().slice(0, 10);
+  const { year, month, day } = parseISO(isoDate);
+  const date = new Date(year, month, day + days);
+  return toLocalISOString(date);
 }
 
 /**
  * Get weekday number (0 = Sunday, 1 = Monday, ..., 6 = Saturday)
  */
 export function getWeekday(isoDate: string): number {
-  const date = new Date(isoDate + "T00:00:00");
-  return date.getDay();
+  const { year, month, day } = parseISO(isoDate);
+  return new Date(year, month, day).getDay();
 }
 
 /**
@@ -40,10 +59,12 @@ export function getWeekdayName(weekday: number): string {
  * Returns positive number if date2 > date1
  */
 export function diffDays(isoDate1: string, isoDate2: string): number {
-  const date1 = new Date(isoDate1 + "T00:00:00");
-  const date2 = new Date(isoDate2 + "T00:00:00");
+  const d1 = parseISO(isoDate1);
+  const d2 = parseISO(isoDate2);
+  const date1 = new Date(d1.year, d1.month, d1.day);
+  const date2 = new Date(d2.year, d2.month, d2.day);
   const diffTime = date2.getTime() - date1.getTime();
-  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return Math.round(diffTime / (1000 * 60 * 60 * 24));
 }
 
 /**
@@ -58,7 +79,7 @@ export function formatDate(isoDate: string): string {
  * Format ISO date to readable Spanish string (e.g., "15 de enero de 2025")
  */
 export function formatDateLong(isoDate: string): string {
-  const date = new Date(isoDate + "T00:00:00");
+  const { year, month, day } = parseISO(isoDate);
   const months = [
     "enero",
     "febrero",
@@ -73,10 +94,7 @@ export function formatDateLong(isoDate: string): string {
     "noviembre",
     "diciembre",
   ];
-  const day = date.getDate();
-  const month = months[date.getMonth()];
-  const year = date.getFullYear();
-  return `${day} de ${month} de ${year}`;
+  return `${day} de ${months[month]} de ${year}`;
 }
 
 /**
@@ -96,8 +114,11 @@ export function getWeekStart(isoDate: string): string {
 export function isValidISODate(dateString: string): boolean {
   const regex = /^\d{4}-\d{2}-\d{2}$/;
   if (!regex.test(dateString)) return false;
-  const date = new Date(dateString + "T00:00:00");
-  return date.toISOString().slice(0, 10) === dateString;
+  const { year, month, day } = parseISO(dateString);
+  const date = new Date(year, month, day);
+  return date.getFullYear() === year && 
+         date.getMonth() === month && 
+         date.getDate() === day;
 }
 
 /**

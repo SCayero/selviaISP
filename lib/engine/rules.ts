@@ -40,6 +40,33 @@ export const LOW_AVAILABILITY_THRESHOLD = 30; // minutes - below this, only quiz
 export const QUIZ_BLOCK_DURATION = 15; // minutes - standard quiz duration
 
 /**
+ * Unit study budget (legacy, used by some tests)
+ */
+export const TARGET_MINUTES_PER_UNIT = 240;
+export const MAX_NEW_UNITS_PER_DAY = 1;
+
+/**
+ * Pass 1: Theory envelope per unit (50% of planned total).
+ * theoryPlanned = unitsCount * THEORY_ENVELOPE_MINUTES.
+ * Cases = 0.6 * theory, programming = 0.4 * theory.
+ */
+export const THEORY_ENVELOPE_MINUTES = 510;
+
+/**
+ * Per-unit theory activity durations (within 510m envelope)
+ */
+export const STUDY_THEME_MINUTES = 240;   // must be first per unit
+export const REVIEW_MINUTES = 60;
+export const PODCAST_MINUTES = 60;
+export const FLASHCARD_MINUTES = 60;
+export const QUIZ_MAX_MINUTES = 90;      // soft cap
+
+/**
+ * REPASO budget ratio (Pass 2)
+ */
+export const REPASO_BUDGET_RATIO = 0.25;
+
+/**
  * Selvia Phase Definitions
  */
 export const PHASE_DEFINITIONS: SelviaPhaseDefinition[] = [

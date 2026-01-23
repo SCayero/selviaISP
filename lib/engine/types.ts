@@ -11,19 +11,18 @@ export type BlockFormat = "raw_content" | "summary" | "flashcards" | "audio" | "
 
 export type Stage = "Infantil" | "Primaria";
 
+/**
+ * Activity types for Pass 1 allocation (50% Theory / 30% Cases / 20% Programming)
+ */
 export type ActivityType =
-  | "THEME_STUDY"           // Theory study of a theme
-  | "REPASO_BLOCK"          // Review/repaso session
-  | "CASE_PRACTICE"         // Case practice (casos prácticos)
-  | "PROGRAMMING"           // Programming unit (programación)
-  | "SIM_THEORY"            // Theory simulation
-  | "SIM_CASES"             // Cases simulation
-  | "FEEDBACK_THEORY"       // Feedback review for theory sim
-  | "FEEDBACK_CASES"        // Feedback review for cases sim
-  | "FREE_STUDY"            // Fill residual minutes
-  | "FINAL_REPASO_GENERAL"  // Final general review
-  | "FINAL_SIM_THEORY"      // Final theory simulation
-  | "FINAL_SIM_CASES";      // Final cases simulation
+  | "STUDY_THEME"       // 240m per unit, must be first
+  | "REVIEW"            // 60m per unit
+  | "PODCAST"           // 60m per unit
+  | "FLASHCARD"         // 60m per unit
+  | "QUIZ"              // up to 90m per unit (soft cap)
+  | "CASE_PRACTICE"     // 70% of casesPlanned
+  | "CASE_MOCK"         // 30% of casesPlanned
+  | "PROGRAMMING_BLOCK";
 
 /**
  * User form inputs
@@ -106,6 +105,58 @@ export interface PlanMeta {
 }
 
 /**
+ * Capacity and planned workload (Pass 1).
+ * theoryPlanned = unitsCount * 510; cases = 0.6 * theory; programming = 0.4 * theory; plannedMinutes = 2 * theory.
+ */
+export interface PlanCapacity {
+  totalWeeks: number;
+  effectivePlanningWeeks: number;
+  availableEffectiveMinutes: number;
+  unitsCount: number;
+  theoryPlanned: number;
+  casesPlanned: number;
+  programmingPlanned: number;
+  plannedMinutes: number;
+  bufferMinutes: number;
+  bufferRatio: number;
+  bufferStatus: "good" | "edge" | "warning";
+}
+
+/**
+ * Week-level actual minutes (observation only, not budgets)
+ */
+export interface WeeklyActual {
+  weekIndex: number;
+  weekStart: string;
+  theoryMinutes: number;
+  casesMinutes: number;
+  programmingMinutes: number;
+  totalMinutes: number;
+  /** Streams with < 60m when global remaining > 0 */
+  missingStreams: string[];
+}
+
+/**
+ * Debug metadata for Pass 1 (capacity, allocation, guardrails)
+ */
+export interface PlanDebugInfo {
+  capacity: PlanCapacity;
+  theoryScheduled: number;
+  casesScheduled: number;
+  programmingScheduled: number;
+  totalScheduled: number;
+  theoryRatio: number;
+  casesRatio: number;
+  programmingRatio: number;
+  weeklyActuals: WeeklyActual[];
+  starvationWeeks: number;
+  /** Weeks after week 2 with all 3 streams >= 60m */
+  weeksWithFullPresence: number;
+  /** Denominator for presence % */
+  totalWeeksAfterTwo: number;
+}
+
+/**
  * Complete study plan
  */
 export interface Plan {
@@ -115,6 +166,7 @@ export interface Plan {
   days: DayPlan[];
   weeklySummaries: WeeklySummary[];
   explanations: string[]; // Human-readable explanation bullets
+  debugInfo?: PlanDebugInfo;
 }
 
 /**
@@ -125,18 +177,3 @@ export interface DiagnosticSchedule {
   totalDiagnosticDays: number; // 3-5 days depending on availability
 }
 
-/**
- * Target configuration for activity scheduling
- */
-export interface TargetConfig {
-  hoursAvailable: number;          // Total hours until exam
-  timeCondition: "comfortable" | "tight"; // >= 260h = comfortable
-  casesTarget: number;             // Number of cases to complete
-  programmingHoursTarget: number;  // Hours for programming
-  repasosCount: number;            // Number of repaso sessions
-  simTheoryCount: number;          // Number of theory simulations
-  simCasesCount: number;           // Number of case simulations
-  totalRequiredHours: number;      // Sum of all targets
-  timeWarning: boolean;            // True if available < 90% of required
-  additionalPool: number;          // Surplus hours for free study
-}

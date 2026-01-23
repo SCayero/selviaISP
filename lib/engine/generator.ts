@@ -1,6 +1,6 @@
 /**
- * Selvia Method V0 - Core Plan Generator
- * Deterministic study plan generation engine
+ * Selvia Method V0 - Core Plan Generator (Pass 1)
+ * Uses capacity + global remaining-ratio allocator. No weekly budgets or unlocks.
  */
 
 import type {
@@ -9,505 +9,292 @@ import type {
   DayPlan,
   StudyBlock,
   WeeklySummary,
-  SelviaPhase,
-  GeneratorOptions,
   ActivityType,
-  TargetConfig,
+  WeeklyActual,
+  GeneratorOptions,
 } from "./types";
 import {
-  UNIT_COUNT,
-  UNIT_NAMES,
   MAX_BLOCK_DURATION,
   MIN_BLOCK_DURATION,
-  BLOCKS_PER_DAY,
-  REVIEW_48H_WINDOW,
-  REVIEW_14D_HARD_LIMIT,
-  LOW_AVAILABILITY_THRESHOLD,
-  QUIZ_BLOCK_DURATION,
   PHASE_DEFINITIONS,
 } from "./rules";
-import { scheduleDiagnostics, estimateMastery } from "./diagnostics";
-import { generateExplanations } from "./explain";
+import { getTodayISO, addDays, getWeekday, diffDays, getWeekStart, getNowISO } from "../utils/date";
+import { calculateCapacity } from "./capacity";
 import {
-  getTodayISO,
-  addDays,
-  getWeekday,
-  diffDays,
-  getWeekStart,
-  getNowISO,
-} from "../utils/date";
-import { calculateTargets } from "./targets";
-import { checkUnlocks, SESSION_CAPS, requiresFeedbackPair, getFeedbackActivity } from "./policy";
+  createGlobalBudget,
+  selectActivityWithSmoothing,
+  updateGlobalBudget,
+  getCurrentUnitKey,
+  WEEKLY_MINIMUM_MINUTES,
+  type AllocatorContext,
+} from "./allocator";
+import { generateExplanations } from "./explain";
 
-/**
- * Map ActivityType to backward-compatible StudyBlock fields
- */
-function mapActivityToBlock(
-  activity: ActivityType,
-  durationMinutes: number,
-  unit: string | null = null,
-  caseNumber?: number,
-  simulationNumber?: number
-): Omit<StudyBlock, "notes"> {
-  const baseBlock = {
-    durationMinutes,
-    activity,
-    caseNumber,
-    simulationNumber,
-  };
+function availabilityIndex(weekday: number): number {
+  return weekday === 0 ? 6 : weekday - 1;
+}
 
-  switch (activity) {
-    case "THEME_STUDY":
-      return {
-        ...baseBlock,
-        selviaPhase: "P2_DEPTH",
-        type: "new_content",
-        unit,
-        format: "raw_content",
-      };
-    case "REPASO_BLOCK":
-      return {
-        ...baseBlock,
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "review",
-        unit,
-        format: "flashcards",
-      };
+function activityStream(a: ActivityType): "theory" | "cases" | "programming" {
+  switch (a) {
+    case "STUDY_THEME":
+    case "REVIEW":
+    case "PODCAST":
+    case "FLASHCARD":
+    case "QUIZ":
+      return "theory";
     case "CASE_PRACTICE":
-      return {
-        ...baseBlock,
-        selviaPhase: "P4_PRACTICE",
-        type: "practice",
-        unit: null,
-        format: "quiz",
-      };
-    case "PROGRAMMING":
-      return {
-        ...baseBlock,
-        selviaPhase: "P2_DEPTH",
-        type: "new_content",
-        unit: "Programación",
-        format: "raw_content",
-      };
-    case "SIM_THEORY":
-    case "FINAL_SIM_THEORY":
-      return {
-        ...baseBlock,
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "evaluation",
-        unit: null,
-        format: "quiz",
-        pairedWithNext: true,
-      };
-    case "SIM_CASES":
-    case "FINAL_SIM_CASES":
-      return {
-        ...baseBlock,
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "evaluation",
-        unit: null,
-        format: "quiz",
-        pairedWithNext: true,
-      };
-    case "FEEDBACK_THEORY":
-    case "FEEDBACK_CASES":
-      return {
-        ...baseBlock,
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "review",
-        unit: null,
-        format: "summary",
-      };
-    case "FREE_STUDY":
-      return {
-        ...baseBlock,
-        selviaPhase: "P2_DEPTH",
-        type: "practice",
-        unit: null,
-        format: "raw_content",
-      };
-    case "FINAL_REPASO_GENERAL":
-      return {
-        ...baseBlock,
-        selviaPhase: "P4_PRACTICE",
-        type: "recap",
-        unit: null,
-        format: "flashcards",
-      };
-    default:
-      return {
-        ...baseBlock,
-        selviaPhase: "P2_DEPTH",
-        type: "new_content",
-        unit,
-        format: "raw_content",
-      };
+    case "CASE_MOCK":
+      return "cases";
+    case "PROGRAMMING_BLOCK":
+      return "programming";
   }
 }
 
-/**
- * Generate complete study plan from user inputs
- */
+function mapActivityToBlock(
+  activity: ActivityType,
+  durationMinutes: number,
+  unit: string | null
+): Omit<StudyBlock, "notes"> {
+  const base = { durationMinutes, activity, unit, notes: "" };
+  switch (activity) {
+    case "STUDY_THEME":
+      return { ...base, selviaPhase: "P2_DEPTH", type: "new_content", format: "raw_content" };
+    case "REVIEW":
+      return { ...base, selviaPhase: "P3_EVAL_REVIEW", type: "review", format: "flashcards" };
+    case "PODCAST":
+      return { ...base, selviaPhase: "P2_DEPTH", type: "new_content", format: "audio" };
+    case "FLASHCARD":
+      return { ...base, selviaPhase: "P3_EVAL_REVIEW", type: "recap", format: "flashcards" };
+    case "QUIZ":
+      return { ...base, selviaPhase: "P3_EVAL_REVIEW", type: "quiz", format: "quiz" };
+    case "CASE_PRACTICE":
+      return { ...base, selviaPhase: "P4_PRACTICE", type: "practice", format: "quiz" };
+    case "CASE_MOCK":
+      return { ...base, selviaPhase: "P4_PRACTICE", type: "evaluation", format: "quiz" };
+    case "PROGRAMMING_BLOCK":
+      return { ...base, selviaPhase: "P4_PRACTICE", type: "practice", format: "raw_content", unit: "Programación" };
+    default:
+      return { ...base, selviaPhase: "P2_DEPTH", type: "new_content", format: "raw_content" };
+  }
+}
+
 export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Plan {
-  // Determine today date (for deterministic testing)
-  const today = options?.todayISO || getTodayISO();
+  const today = options?.todayISO ?? getTodayISO();
   const examDate = inputs.examDate;
   const totalDays = diffDays(today, examDate);
+  const capacity = calculateCapacity(inputs, { todayISO: today });
+  const budget = createGlobalBudget(capacity);
 
-  // Calculate targets
-  const targets = calculateTargets(inputs, totalDays, options);
+  const days: DayPlan[] = [];
+  const weeklyActuals: WeeklyActual[] = [];
+  let theoryScheduled = 0;
+  let casesScheduled = 0;
+  let programmingScheduled = 0;
 
-  // Initialize mastery tracking (empty unless alreadyStudying)
-  const masteryByUnit: Record<string, number> = {};
+  let lastWeekCases = 0;
+  let lastWeekProg = 0;
+  let thisWeekTheory = 0;
+  let thisWeekCases = 0;
+  let thisWeekProg = 0;
+  let lastWeekStart: string | null = null;
+  let starvationWeeks = 0;
+  let weekIndexBase = 0;
+  let weeksWithFullPresence = 0;
+  let totalWeeksAfterTwo = 0;
 
-  // Schedule diagnostics if already studying
-  let diagnosticSchedule = null;
-  if (inputs.alreadyStudying && totalDays > 0) {
-    diagnosticSchedule = scheduleDiagnostics(inputs, totalDays);
-    // Estimate mastery for all units
-    UNIT_NAMES.forEach((unit, index) => {
-      masteryByUnit[unit] = estimateMastery(inputs, index);
-    });
+  const weeklyAvailability = new Map<string, number>();
+  for (let d = 0; d < totalDays; d++) {
+    const date = addDays(today, d);
+    const ws = getWeekStart(date);
+    const wd = getWeekday(date);
+    const mins = Math.round((inputs.availabilityHoursByWeekday[availabilityIndex(wd)] ?? 0) * 60);
+    weeklyAvailability.set(ws, (weeklyAvailability.get(ws) ?? 0) + mins);
   }
 
-  // Track unit study history
-  const lastStudiedAt: Record<string, string> = {}; // unit -> ISO date
-  const firstStudiedAt: Record<string, string> = {}; // unit -> ISO date
-  const coveredUnits: Set<string> = new Set();
-  let nextUnitIndex = 0; // For assigning new units
+  const MIN = WEEKLY_MINIMUM_MINUTES;
 
-  // Track activity completion
-  let accumulatedHours = 0;
-  let casesCompleted = 0;
-  let programmingHoursCompleted = 0;
-  let repasosCompleted = 0;
-  let simTheoryCompleted = 0;
-  let simCasesCompleted = 0;
-
-  // Generate day-by-day schedule
-  const days: DayPlan[] = [];
+  function missingStreamsForWeek(tTheory: number, tCases: number, tProg: number): string[] {
+    const out: string[] = [];
+    if (tTheory < MIN && budget.theoryRemaining > 0) out.push("THEORY");
+    if (tCases < MIN && budget.casesRemaining > 0) out.push("CASES");
+    if (tProg < MIN && budget.programmingRemaining > 0) out.push("PROGRAMMING");
+    return out;
+  }
 
   for (let dayIndex = 0; dayIndex < totalDays; dayIndex++) {
-    const currentDate = addDays(today, dayIndex);
-    const weekday = getWeekday(currentDate);
-    const availableHours = inputs.availabilityHoursByWeekday[weekday === 0 ? 6 : weekday - 1]; // Convert Sunday=0 to Sunday=6
-    const availableMinutes = availableHours * 60;
-    const daysRemaining = totalDays - dayIndex;
+    const date = addDays(today, dayIndex);
+    const weekday = getWeekday(date);
+    const idx = availabilityIndex(weekday);
+    const availHours = inputs.availabilityHoursByWeekday[idx] ?? 0;
+    const availableMinutes = Math.round(availHours * 60);
+    const weekIndex = Math.floor(dayIndex / 7) + 1;
+    const weekStart = getWeekStart(date);
+
+    if (weekStart !== lastWeekStart && lastWeekStart !== null) {
+      const miss = missingStreamsForWeek(thisWeekTheory, thisWeekCases, thisWeekProg);
+      weeklyActuals.push({
+        weekIndex: weekIndexBase,
+        weekStart: lastWeekStart,
+        theoryMinutes: thisWeekTheory,
+        casesMinutes: thisWeekCases,
+        programmingMinutes: thisWeekProg,
+        totalMinutes: thisWeekTheory + thisWeekCases + thisWeekProg,
+        missingStreams: miss,
+      });
+      if (weekIndexBase > 2) {
+        totalWeeksAfterTwo++;
+        if (miss.length === 0) weeksWithFullPresence++;
+        if (budget.casesRemaining > 0 && thisWeekCases === 0) starvationWeeks++;
+        if (budget.programmingRemaining > 0 && thisWeekProg === 0) starvationWeeks++;
+      }
+      lastWeekCases = thisWeekCases;
+      lastWeekProg = thisWeekProg;
+      thisWeekTheory = 0;
+      thisWeekCases = 0;
+      thisWeekProg = 0;
+    }
+    lastWeekStart = weekStart;
+    weekIndexBase = weekIndex;
+
+    function buildCtx(): AllocatorContext {
+      const weekTotal = weeklyAvailability.get(weekStart) ?? 0;
+      const weekUsed = thisWeekTheory + thisWeekCases + thisWeekProg;
+      return {
+        lastWeekCasesMinutes: lastWeekCases,
+        lastWeekProgrammingMinutes: lastWeekProg,
+        thisWeekTheory,
+        thisWeekCases,
+        thisWeekProg,
+        weekRemainingMinutes: Math.max(0, weekTotal - weekUsed),
+        weekIndex,
+      };
+    }
+
+    if (weekIndex > capacity.effectivePlanningWeeks) {
+      days.push({ date, weekday, totalHours: 0, blocks: [] });
+      continue;
+    }
+
+    if (availableMinutes < 15) {
+      days.push({ date, weekday, totalHours: 0, blocks: [] });
+      continue;
+    }
 
     const blocks: StudyBlock[] = [];
+    let remaining = availableMinutes;
 
-    // Handle zero availability (rest day)
-    if (availableMinutes === 0) {
-      days.push({
-        date: currentDate,
-        weekday,
-        totalHours: 0,
-        blocks: [],
-      });
-      continue;
-    }
-
-    // Handle low availability (< 30 minutes) - only quiz block
-    if (availableMinutes < LOW_AVAILABILITY_THRESHOLD) {
-      blocks.push({
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "quiz",
-        unit: null,
-        format: "quiz",
-        durationMinutes: Math.min(availableMinutes, QUIZ_BLOCK_DURATION),
-        notes: "Sesión ligera - solo cuestionario",
-      });
-
-      days.push({
-        date: currentDate,
-        weekday,
-        totalHours: blocks.reduce((sum, b) => sum + b.durationMinutes, 0) / 60,
-        blocks,
-      });
-      continue;
-    }
-
-    // Check unlock state
-    const unlocks = checkUnlocks(accumulatedHours, daysRemaining);
-
-    // Normal day scheduling
-    let remainingMinutes = availableMinutes;
-
-    // ALWAYS start with quiz block (10-15 minutes)
-    const quizDuration = Math.min(QUIZ_BLOCK_DURATION, remainingMinutes);
-    blocks.push({
-      selviaPhase: "P3_EVAL_REVIEW",
-      type: "quiz",
-      unit: null,
-      format: "quiz",
-      durationMinutes: quizDuration,
-      notes: "Cuestionario diario de activación",
-    });
-    remainingMinutes -= quizDuration;
-
-    // Check for diagnostic evaluation (only in diagnostic days)
-    const isDiagnosticDay = diagnosticSchedule?.diagnosticDays.includes(dayIndex) ?? false;
-    if (isDiagnosticDay && remainingMinutes >= MIN_BLOCK_DURATION) {
-      const evalDuration = Math.min(MAX_BLOCK_DURATION, Math.floor(remainingMinutes * 0.3)); // 30% of remaining time
-      blocks.push({
-        selviaPhase: "P3_EVAL_REVIEW",
-        type: "evaluation",
-        unit: null,
-        format: "quiz",
-        durationMinutes: Math.max(MIN_BLOCK_DURATION, evalDuration),
-        notes: "Evaluación diagnóstica",
-      });
-      remainingMinutes -= blocks[blocks.length - 1].durationMinutes;
-    }
-
-    // Priority 1: 14-day hard revisit (highest priority) - map to REPASO_BLOCK
-    const criticalReviews: { unit: string; daysSinceLastStudy: number }[] = [];
-    Object.keys(lastStudiedAt).forEach((unit) => {
-      const daysSince = diffDays(lastStudiedAt[unit], currentDate);
-      if (daysSince >= REVIEW_14D_HARD_LIMIT) {
-        criticalReviews.push({ unit, daysSinceLastStudy: daysSince });
-      }
-    });
-    criticalReviews.sort((a, b) => b.daysSinceLastStudy - a.daysSinceLastStudy); // Most overdue first
-
-    // Schedule critical 14-day reviews as REPASO_BLOCK
-    for (const review of criticalReviews) {
-      if (remainingMinutes < MIN_BLOCK_DURATION) break;
-
-      const reviewDuration = Math.min(
-        SESSION_CAPS.REPASO_BLOCK,
-        Math.max(MIN_BLOCK_DURATION, Math.floor(remainingMinutes / 2))
-      );
-      const blockData = mapActivityToBlock("REPASO_BLOCK", reviewDuration, review.unit);
-      blocks.push({
-        ...blockData,
-        notes: `Revisión obligatoria (${review.daysSinceLastStudy} días desde última vez)`,
-      });
-      remainingMinutes -= reviewDuration;
-      lastStudiedAt[review.unit] = currentDate; // Update last studied
-      repasosCompleted++;
-    }
-
-    // Priority 2: 48-hour reviews (best-effort) - map to REPASO_BLOCK
-    const deferred48hReviews: { unit: string; firstStudied: string }[] = [];
-    Object.keys(firstStudiedAt).forEach((unit) => {
-      const daysSinceFirst = diffDays(firstStudiedAt[unit], currentDate);
-      const lastStudyDays = lastStudiedAt[unit] ? diffDays(lastStudiedAt[unit], currentDate) : daysSinceFirst;
-
-      // If first studied 1-2 days ago and not yet reviewed
-      if (daysSinceFirst >= 1 && daysSinceFirst <= REVIEW_48H_WINDOW && lastStudyDays === daysSinceFirst) {
-        deferred48hReviews.push({ unit, firstStudied: firstStudiedAt[unit] });
-      }
-    });
-
-    // Schedule 48h reviews if time allows
-    for (const review of deferred48hReviews) {
-      if (remainingMinutes < MIN_BLOCK_DURATION) break;
-
-      const reviewDuration = Math.min(
-        SESSION_CAPS.REPASO_BLOCK,
-        Math.max(MIN_BLOCK_DURATION, Math.floor(remainingMinutes * 0.25))
-      );
-      const blockData = mapActivityToBlock("REPASO_BLOCK", reviewDuration, review.unit);
-      blocks.push({
-        ...blockData,
-        notes: "Repaso ligero dentro de 48h",
-      });
-      remainingMinutes -= reviewDuration;
-      lastStudiedAt[review.unit] = currentDate;
-      repasosCompleted++;
-    }
-
-    // Priority 3: Activity selection based on unlock state and targets
-    const targetBlocks = Math.min(
-      BLOCKS_PER_DAY.max,
-      Math.max(
-        BLOCKS_PER_DAY.min,
-        Math.ceil(remainingMinutes / (MAX_BLOCK_DURATION * 0.8))
-      )
-    );
-    const currentBlockCount = blocks.length;
-    const blocksToAdd = Math.min(targetBlocks - currentBlockCount, Math.ceil(remainingMinutes / MIN_BLOCK_DURATION));
-
-    // Track if we need feedback pairing
-    let needsFeedback: ActivityType | null = null;
-
-    for (let i = 0; i < blocksToAdd && remainingMinutes >= MIN_BLOCK_DURATION; i++) {
-      let activity: ActivityType;
-      let unit: string | null = null;
-      let caseNum: number | undefined;
-      let simNum: number | undefined;
-      let notes = "";
-
-      // If previous block needs feedback, schedule it immediately
-      if (needsFeedback) {
-        activity = getFeedbackActivity(needsFeedback);
-        const feedbackDuration = Math.min(
-          SESSION_CAPS[activity],
-          Math.max(MIN_BLOCK_DURATION, remainingMinutes)
-        );
-        const blockData = mapActivityToBlock(activity, feedbackDuration);
-        blocks.push({
-          ...blockData,
-          notes: "Revisión de feedback del simulacro",
-        });
-        remainingMinutes -= feedbackDuration;
-        needsFeedback = null;
-        continue;
-      }
-
-      // Determine activity based on phase
-      if (unlocks.finalPhaseActive) {
-        // Final 7 days: prioritize final simulations and general repaso
-        if (simTheoryCompleted < targets.simTheoryCount && remainingMinutes >= SESSION_CAPS.FINAL_SIM_THEORY + SESSION_CAPS.FEEDBACK_THEORY) {
-          activity = "FINAL_SIM_THEORY";
-          simNum = simTheoryCompleted + 1;
-          notes = `Simulacro final de teoría #${simNum}`;
-          needsFeedback = activity;
-          simTheoryCompleted++;
-        } else if (simCasesCompleted < targets.simCasesCount && remainingMinutes >= SESSION_CAPS.FINAL_SIM_CASES + SESSION_CAPS.FEEDBACK_CASES) {
-          activity = "FINAL_SIM_CASES";
-          simNum = simCasesCompleted + 1;
-          notes = `Simulacro final de casos #${simNum}`;
-          needsFeedback = activity;
-          simCasesCompleted++;
+    if (remaining >= 60) {
+      while (remaining >= 60) {
+        const act = selectActivityWithSmoothing(budget, buildCtx());
+        if (!act) break;
+        const dur = Math.min(MAX_BLOCK_DURATION, remaining);
+        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+        const raw = mapActivityToBlock(act, dur, unit);
+        blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+        updateGlobalBudget(budget, act, dur);
+        remaining -= dur;
+        const stream = activityStream(act);
+        if (stream === "theory") {
+          theoryScheduled += dur;
+          thisWeekTheory += dur;
+        } else if (stream === "cases") {
+          casesScheduled += dur;
+          thisWeekCases += dur;
         } else {
-          activity = "FINAL_REPASO_GENERAL";
-          notes = "Repaso general final";
+          programmingScheduled += dur;
+          thisWeekProg += dur;
         }
-      } else if (!unlocks.casesUnlocked && !unlocks.programmingUnlocked && !unlocks.simulationsUnlocked) {
-        // Early period: only THEME_STUDY
-        activity = "THEME_STUDY";
-        if (nextUnitIndex < UNIT_NAMES.length) {
-          unit = UNIT_NAMES[nextUnitIndex];
-          if (!firstStudiedAt[unit]) {
-            firstStudiedAt[unit] = currentDate;
-          }
-          lastStudiedAt[unit] = currentDate;
-          coveredUnits.add(unit);
-          nextUnitIndex++;
-          notes = `Estudio de ${unit}`;
-        } else {
-          notes = "Estudio de contenido teórico";
-        }
-      } else {
-        // After unlock: rotate through activities based on targets
-        const rotationIndex = (dayIndex + i) % 4;
-
-        if (rotationIndex === 0 && casesCompleted < targets.casesTarget) {
-          // Cases practice
-          activity = "CASE_PRACTICE";
-          caseNum = casesCompleted + 1;
-          notes = `Caso práctico #${caseNum}`;
-          casesCompleted++;
-        } else if (rotationIndex === 1 && programmingHoursCompleted < targets.programmingHoursTarget && inputs.planProgramming !== false) {
-          // Programming
-          activity = "PROGRAMMING";
-          notes = "Sesión de programación";
-          programmingHoursCompleted += 0.5; // Track in increments
-        } else if (rotationIndex === 2 && simTheoryCompleted < targets.simTheoryCount && remainingMinutes >= SESSION_CAPS.SIM_THEORY + SESSION_CAPS.FEEDBACK_THEORY) {
-          // Theory simulation
-          activity = "SIM_THEORY";
-          simNum = simTheoryCompleted + 1;
-          notes = `Simulacro de teoría #${simNum}`;
-          needsFeedback = activity;
-          simTheoryCompleted++;
-        } else if (rotationIndex === 3 && simCasesCompleted < targets.simCasesCount && remainingMinutes >= SESSION_CAPS.SIM_CASES + SESSION_CAPS.FEEDBACK_CASES) {
-          // Cases simulation
-          activity = "SIM_CASES";
-          simNum = simCasesCompleted + 1;
-          notes = `Simulacro de casos #${simNum}`;
-          needsFeedback = activity;
-          simCasesCompleted++;
-        } else {
-          // Default: THEME_STUDY
-          activity = "THEME_STUDY";
-          if (nextUnitIndex < UNIT_NAMES.length) {
-            unit = UNIT_NAMES[nextUnitIndex];
-            if (!firstStudiedAt[unit]) {
-              firstStudiedAt[unit] = currentDate;
-            }
-            lastStudiedAt[unit] = currentDate;
-            coveredUnits.add(unit);
-            nextUnitIndex++;
-            notes = `Estudio de ${unit}`;
+      }
+      if (remaining >= 15) {
+        const act = selectActivityWithSmoothing(budget, buildCtx());
+        if (act) {
+          const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+          const raw = mapActivityToBlock(act, remaining, unit);
+          blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+          updateGlobalBudget(budget, act, remaining);
+          const stream = activityStream(act);
+          if (stream === "theory") {
+            theoryScheduled += remaining;
+            thisWeekTheory += remaining;
+          } else if (stream === "cases") {
+            casesScheduled += remaining;
+            thisWeekCases += remaining;
           } else {
-            notes = "Estudio de contenido teórico";
+            programmingScheduled += remaining;
+            thisWeekProg += remaining;
           }
+          remaining = 0;
         }
       }
-
-      // Calculate block duration respecting session caps
-      const activityCap = SESSION_CAPS[activity] || MAX_BLOCK_DURATION;
-      const blockDuration = Math.min(
-        activityCap,
-        Math.max(MIN_BLOCK_DURATION, Math.floor(remainingMinutes / (blocksToAdd - i)))
-      );
-
-      const blockData = mapActivityToBlock(activity, blockDuration, unit, caseNum, simNum);
-      blocks.push({
-        ...blockData,
-        notes,
-      });
-
-      remainingMinutes -= blockDuration;
+    } else {
+      const act = selectActivityWithSmoothing(budget, buildCtx());
+      if (act) {
+        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+        const raw = mapActivityToBlock(act, remaining, unit);
+        blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+        updateGlobalBudget(budget, act, remaining);
+        const stream = activityStream(act);
+        if (stream === "theory") {
+          theoryScheduled += remaining;
+          thisWeekTheory += remaining;
+        } else if (stream === "cases") {
+          casesScheduled += remaining;
+          thisWeekCases += remaining;
+        } else {
+          programmingScheduled += remaining;
+          thisWeekProg += remaining;
+        }
+      }
     }
 
-    // Fill any residual time with FREE_STUDY
-    if (remainingMinutes >= MIN_BLOCK_DURATION) {
-      const freeStudyDuration = Math.min(SESSION_CAPS.FREE_STUDY, remainingMinutes);
-      const blockData = mapActivityToBlock("FREE_STUDY", freeStudyDuration);
-      blocks.push({
-        ...blockData,
-        notes: "Tiempo libre para reforzar áreas de interés",
-      });
-      remainingMinutes -= freeStudyDuration;
-    }
-
-    // Calculate day total
-    const dayTotalHours = blocks.reduce((sum, b) => sum + b.durationMinutes, 0) / 60;
-    
-    days.push({
-      date: currentDate,
-      weekday,
-      totalHours: dayTotalHours,
-      blocks,
-    });
-
-    // Update accumulated hours for unlock tracking
-    accumulatedHours += dayTotalHours;
+    const totalHours = blocks.reduce((s, b) => s + b.durationMinutes, 0) / 60;
+    days.push({ date, weekday, totalHours, blocks });
   }
 
-  // Generate weekly summaries
-  const weeklySummaries: WeeklySummary[] = [];
-  const weekMap = new Map<string, WeeklySummary>();
-
-  days.forEach((day) => {
-    const weekStart = getWeekStart(day.date);
-    let summary = weekMap.get(weekStart);
-    if (!summary) {
-      summary = {
-        weekStartDate: weekStart,
-        totalHours: 0,
-        allocationByPhase: {
-          P1_CONTEXT: 0,
-          P2_DEPTH: 0,
-          P3_EVAL_REVIEW: 0,
-          P4_PRACTICE: 0,
-        },
-      };
-      weekMap.set(weekStart, summary);
-    }
-
-    summary.totalHours += day.totalHours;
-    day.blocks.forEach((block) => {
-      summary.allocationByPhase[block.selviaPhase] += block.durationMinutes;
+  if (lastWeekStart) {
+    const miss = missingStreamsForWeek(thisWeekTheory, thisWeekCases, thisWeekProg);
+    weeklyActuals.push({
+      weekIndex: weekIndexBase,
+      weekStart: lastWeekStart,
+      theoryMinutes: thisWeekTheory,
+      casesMinutes: thisWeekCases,
+      programmingMinutes: thisWeekProg,
+      totalMinutes: thisWeekTheory + thisWeekCases + thisWeekProg,
+      missingStreams: miss,
     });
-  });
+    if (weekIndexBase > 2) {
+      totalWeeksAfterTwo++;
+      if (miss.length === 0) weeksWithFullPresence++;
+      if (budget.casesRemaining > 0 && thisWeekCases === 0) starvationWeeks++;
+      if (budget.programmingRemaining > 0 && thisWeekProg === 0) starvationWeeks++;
+    }
+  }
 
-  weeklySummaries.push(...Array.from(weekMap.values()));
+  const totalScheduled = theoryScheduled + casesScheduled + programmingScheduled;
+  const theoryRatio = totalScheduled > 0 ? theoryScheduled / totalScheduled : 0;
+  const casesRatio = totalScheduled > 0 ? casesScheduled / totalScheduled : 0;
+  const programmingRatio = totalScheduled > 0 ? programmingScheduled / totalScheduled : 0;
 
-  // Generate explanations
+  const unitCount = capacity.unitsCount;
+  const weekMap = new Map<string, WeeklySummary>();
+  for (const day of days) {
+    const ws = getWeekStart(day.date);
+    let sum = weekMap.get(ws);
+    if (!sum) {
+      sum = {
+        weekStartDate: ws,
+        totalHours: 0,
+        allocationByPhase: { P1_CONTEXT: 0, P2_DEPTH: 0, P3_EVAL_REVIEW: 0, P4_PRACTICE: 0 },
+      };
+      weekMap.set(ws, sum);
+    }
+    sum.totalHours += day.totalHours;
+    for (const b of day.blocks) {
+      sum.allocationByPhase[b.selviaPhase] += b.durationMinutes;
+    }
+  }
+  const weeklySummaries = Array.from(weekMap.values());
+
   const plan: Plan = {
     meta: {
       generatedAt: getNowISO(),
@@ -515,16 +302,28 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
       examDate,
       region: inputs.region,
       stage: inputs.stage,
-      unitsTotal: UNIT_COUNT,
+      unitsTotal: unitCount,
     },
     phases: PHASE_DEFINITIONS,
-    masteryByUnit,
+    masteryByUnit: {},
     days,
     weeklySummaries,
     explanations: [],
+    debugInfo: {
+      capacity,
+      theoryScheduled,
+      casesScheduled,
+      programmingScheduled,
+      totalScheduled,
+      theoryRatio,
+      casesRatio,
+      programmingRatio,
+      weeklyActuals,
+      starvationWeeks,
+      weeksWithFullPresence,
+      totalWeeksAfterTwo,
+    },
   };
-
   plan.explanations = generateExplanations(plan, inputs);
-
   return plan;
 }
