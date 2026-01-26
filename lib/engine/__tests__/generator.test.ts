@@ -186,7 +186,7 @@ describe("generatePlan (edge cases)", () => {
 describe("generatePlan (secondary activation)", () => {
   const SECONDARY_ACTIVITIES = ["PODCAST", "FLASHCARD", "QUIZ", "REVIEW"] as const;
 
-  it("SEC-01: No secondary theory blocks for units with 0 cumulative STUDY_THEME", () => {
+  it("SEC-01: No secondary theory blocks for units with cumulative STUDY_THEME < 120", () => {
     const inputs = createInputs();
     const plan = generatePlan(inputs, { todayISO: TEST_TODAY });
     const studyThemeByUnit: Record<string, number> = {};
@@ -200,7 +200,7 @@ describe("generatePlan (secondary activation)", () => {
         }
         if (SECONDARY_ACTIVITIES.includes(act as (typeof SECONDARY_ACTIVITIES)[number]) && unit) {
           const cum = studyThemeByUnit[unit] ?? 0;
-          expect(cum).toBeGreaterThan(0);
+          expect(cum).toBeGreaterThanOrEqual(120);
         }
       }
     }

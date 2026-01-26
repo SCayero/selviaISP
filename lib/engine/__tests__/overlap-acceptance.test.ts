@@ -102,6 +102,45 @@ function getAvailableMinutesForDay(day: DayPlan, inputs: FormInputs): number {
   return Math.round(hours * 60);
 }
 
+function dayMinutes(day: DayPlan): number {
+  return day.blocks.reduce((s, b) => s + b.durationMinutes, 0);
+}
+
+function cumulativeStudyThemeMinutesUpTo(
+  days: DayPlan[],
+  date: string,
+  unit: string
+): number {
+  let sum = 0;
+  for (const d of days) {
+    if (d.date > date) break;
+    for (const b of d.blocks) {
+      if (getActivity(b) === "STUDY_THEME" && b.unit === unit) {
+        sum += b.durationMinutes;
+      }
+    }
+  }
+  return sum;
+}
+
+const ACTIVATION_THRESHOLD = 120;
+
+function isActivated(days: DayPlan[], date: string, unit: string): boolean {
+  return cumulativeStudyThemeMinutesUpTo(days, date, unit) >= ACTIVATION_THRESHOLD;
+}
+
+function isCompletedStudyTheme(days: DayPlan[], date: string, unit: string): boolean {
+  return cumulativeStudyThemeMinutesUpTo(days, date, unit) >= 240;
+}
+
+function distinctSyllabusUnitsTouched(day: DayPlan): string[] {
+  const units = new Set<string>();
+  for (const b of day.blocks) {
+    if (b.unit && b.unit !== "Programación") units.add(b.unit);
+  }
+  return Array.from(units);
+}
+
 describe("Overlap rules V1 acceptance tests", () => {
   const INPUTS = createInputs();
 
@@ -235,5 +274,73 @@ describe("Overlap rules V1 acceptance tests", () => {
       if (units === 1 && total >= 180) singleFocusCount++;
     }
     expect(singleFocusCount).toBeLessThanOrEqual(6);
+  });
+
+  const SECONDARY_ACTIVITIES = ["PODCAST", "FLASHCARD", "QUIZ", "REVIEW"] as const;
+
+  it("AT-A1: No secondary theory on unactivated units", () => {
+    const plan = generatePlan(INPUTS, { todayISO: TEST_TODAY });
+    for (const day of plan.days) {
+      for (const b of day.blocks) {
+        const a = getActivity(b);
+        const unit = b.unit;
+        if (!unit || !SECONDARY_ACTIVITIES.includes(a as (typeof SECONDARY_ACTIVITIES)[number])) continue;
+        if (unit === "Programación") continue;
+        expect(isActivated(plan.days, day.date, unit)).toBe(true);
+      }
+    }
+  });
+
+  it("AT-A2: Units with 0 STUDY_THEME never appear in secondary activities", () => {
+    const plan = generatePlan(INPUTS, { todayISO: TEST_TODAY });
+    const studyThemeUnits = new Set<string>();
+    for (const day of plan.days) {
+      for (const b of day.blocks) {
+        if (getActivity(b) === "STUDY_THEME" && b.unit) studyThemeUnits.add(b.unit);
+      }
+    }
+    for (const day of plan.days) {
+      for (const b of day.blocks) {
+        const a = getActivity(b);
+        const unit = b.unit;
+        if (!unit || !SECONDARY_ACTIVITIES.includes(a as (typeof SECONDARY_ACTIVITIES)[number])) continue;
+        expect(studyThemeUnits.has(unit)).toBe(true);
+      }
+    }
+  });
+
+  it("AT-B2-180: STUDY_THEME cap for 3h (180m) days", () => {
+    const inputs = createInputs({
+      availabilityHoursByWeekday: [4, 4, 3, 4, 4, 0, 0],
+    });
+    const plan = generatePlan(inputs, { todayISO: TEST_TODAY });
+    for (const day of plan.days) {
+      const availableMinutes = getAvailableMinutesForDay(day, inputs);
+      if (availableMinutes !== 180) continue;
+      const studyThemeMinutes = getStudyThemeMinutesForDay(day);
+      expect(studyThemeMinutes).toBeLessThanOrEqual(120);
+    }
+  });
+
+  it("AT-B2-120: STUDY_THEME cap for 2h (120m) days", () => {
+    const inputs = createInputs({
+      availabilityHoursByWeekday: [4, 4, 4, 2, 4, 0, 0],
+    });
+    const plan = generatePlan(inputs, { todayISO: TEST_TODAY });
+    for (const day of plan.days) {
+      const availableMinutes = getAvailableMinutesForDay(day, inputs);
+      if (availableMinutes !== 120) continue;
+      const studyThemeMinutes = getStudyThemeMinutesForDay(day);
+      expect(studyThemeMinutes).toBeLessThanOrEqual(120);
+    }
+  });
+
+  it("AT-C1: Max 3 syllabus units touched per day", () => {
+    const plan = generatePlan(INPUTS, { todayISO: TEST_TODAY });
+    for (const day of plan.days) {
+      if (dayMinutes(day) === 0) continue;
+      const units = distinctSyllabusUnitsTouched(day);
+      expect(units.length).toBeLessThanOrEqual(3);
+    }
   });
 });

@@ -133,7 +133,8 @@ function firstEligiblePrimaryUnit(
 
 /**
  * Secondary theory (P/F/Q/REVIEW) for a given unit.
- * Unit must be activated: studyThemeDone > 0 OR is today's STUDY_THEME unit (same-day activation).
+ * Unit must be activated: studyThemeDone >= START_NEXT_UNIT_THRESHOLD (120m).
+ * Same-day: secondary allowed once unit reaches 120m cumulative that day.
  * REVIEW only after 240m STUDY_THEME.
  */
 function selectSecondaryForUnit(
@@ -144,9 +145,8 @@ function selectSecondaryForUnit(
   const u = budget.unitTheoryRemaining[unitKey];
   if (!u || u.totalRemaining <= 0) return null;
 
-  const isActivated = (u.studyThemeDone ?? 0) > 0;
-  const isTodayUnit = todayUnit != null && todayUnit === unitKey;
-  if (!isActivated && !isTodayUnit) return null;
+  const isActivated = (u.studyThemeDone ?? 0) >= START_NEXT_UNIT_THRESHOLD;
+  if (!isActivated) return null;
 
   const canReview = (u.studyThemeDone ?? 0) >= STUDY_THEME_COMPLETE_THRESHOLD && u.reviewRemaining > 0;
   if (canReview) return "REVIEW";
@@ -156,10 +156,10 @@ function selectSecondaryForUnit(
   return null;
 }
 
-/** Units with studyThemeDone > 0 (started). */
+/** Units with studyThemeDone >= START_NEXT_UNIT_THRESHOLD (120m, activated). */
 function activeUnitKeys(budget: GlobalBudget): string[] {
   return sortedUnitKeys(budget).filter(
-    (k) => (budget.unitTheoryRemaining[k].studyThemeDone ?? 0) > 0
+    (k) => (budget.unitTheoryRemaining[k].studyThemeDone ?? 0) >= START_NEXT_UNIT_THRESHOLD
   );
 }
 
@@ -176,7 +176,6 @@ function selectSecondaryWithInterleaving(
   const active = activeUnitKeys(budget);
   const preferOther = active.length >= 2 && todayUnit != null;
   const activatedSet = new Set(active);
-  if (todayUnit) activatedSet.add(todayUnit);
   const keys = sortedUnitKeys(budget).filter((k) => activatedSet.has(k));
   const order = preferOther
     ? keys.filter((k) => k !== todayUnit).concat(keys.filter((k) => k === todayUnit))
@@ -247,9 +246,6 @@ export function selectTheoryActivity(
   }
 
   const activatedUnits = activeUnitKeys(budget);
-  if (todayUnit && !activatedUnits.includes(todayUnit)) {
-    activatedUnits.push(todayUnit);
-  }
   for (const k of activatedUnits) {
     const act = selectSecondaryForUnit(budget, k, todayUnit);
     if (act) {

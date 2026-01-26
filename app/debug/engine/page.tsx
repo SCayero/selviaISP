@@ -7,6 +7,9 @@ import { groupConsecutiveBlocks } from "@/lib/ui/groupBlocks";
 
 const STORAGE_KEY = "selvia-debug-engine-inputs-v1";
 
+/** Number of plan days to show with detailed blocks in the debug view. */
+const DEBUG_DETAILED_DAYS = 7;
+
 interface DebugInputs extends FormInputs {
   pinnedToday: string;
 }
@@ -528,10 +531,10 @@ export default function EngineDebugPage() {
 
         <div className="mb-6 rounded-lg border border-border bg-card p-4 shadow-soft">
           <h2 className="mb-3 text-lg font-semibold text-text" style={{ fontWeight: 700 }}>
-            First 3 Days (Detailed)
+            First {DEBUG_DETAILED_DAYS} Days (Detailed)
           </h2>
           <div className="space-y-4">
-            {plan.days.slice(0, 3).map((day, dayIndex) => {
+            {plan.days.slice(0, DEBUG_DETAILED_DAYS).map((day, dayIndex) => {
               const groupedBlocks = groupConsecutiveBlocks(day.blocks);
               return (
                 <div key={dayIndex} className="rounded-lg border border-border bg-bg p-4">
