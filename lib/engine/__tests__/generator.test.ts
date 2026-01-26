@@ -182,3 +182,53 @@ describe("generatePlan (edge cases)", () => {
     });
   });
 });
+
+describe("generatePlan (secondary activation)", () => {
+  const SECONDARY_ACTIVITIES = ["PODCAST", "FLASHCARD", "QUIZ", "REVIEW"] as const;
+
+  it("SEC-01: No secondary theory blocks for units with 0 cumulative STUDY_THEME", () => {
+    const inputs = createInputs();
+    const plan = generatePlan(inputs, { todayISO: TEST_TODAY });
+    const studyThemeByUnit: Record<string, number> = {};
+    const first14 = plan.days.slice(0, 14);
+    for (const day of first14) {
+      for (const b of day.blocks) {
+        const act = b.activity;
+        const unit = b.unit ?? null;
+        if (act === "STUDY_THEME" && unit) {
+          studyThemeByUnit[unit] = (studyThemeByUnit[unit] ?? 0) + b.durationMinutes;
+        }
+        if (SECONDARY_ACTIVITIES.includes(act as (typeof SECONDARY_ACTIVITIES)[number]) && unit) {
+          const cum = studyThemeByUnit[unit] ?? 0;
+          expect(cum).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  it("SEC-02: Secondary allowed for primary unit on same day after first STUDY_THEME", () => {
+    const inputs = createInputs({ availabilityHoursByWeekday: [4, 4, 4, 4, 4, 0, 0] });
+    const plan = generatePlan(inputs, { todayISO: TEST_TODAY });
+    let found = false;
+    for (const day of plan.days) {
+      let studyThemeUnit: string | null = null;
+      let hasSecondaryForPrimary = false;
+      for (const b of day.blocks) {
+        if (b.activity === "STUDY_THEME" && b.unit) studyThemeUnit = b.unit;
+        if (
+          studyThemeUnit &&
+          SECONDARY_ACTIVITIES.includes(b.activity as (typeof SECONDARY_ACTIVITIES)[number]) &&
+          b.unit === studyThemeUnit
+        ) {
+          hasSecondaryForPrimary = true;
+          break;
+        }
+      }
+      if (hasSecondaryForPrimary) {
+        found = true;
+        break;
+      }
+    }
+    expect(found).toBe(true);
+  });
+});

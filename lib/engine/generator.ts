@@ -156,20 +156,6 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
     lastWeekStart = weekStart;
     weekIndexBase = weekIndex;
 
-    function buildCtx(): AllocatorContext {
-      const weekTotal = weeklyAvailability.get(weekStart) ?? 0;
-      const weekUsed = thisWeekTheory + thisWeekCases + thisWeekProg;
-      return {
-        lastWeekCasesMinutes: lastWeekCases,
-        lastWeekProgrammingMinutes: lastWeekProg,
-        thisWeekTheory,
-        thisWeekCases,
-        thisWeekProg,
-        weekRemainingMinutes: Math.max(0, weekTotal - weekUsed),
-        weekIndex,
-      };
-    }
-
     if (weekIndex > capacity.effectivePlanningWeeks) {
       days.push({ date, weekday, totalHours: 0, blocks: [] });
       continue;
@@ -182,21 +168,48 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
 
     const blocks: StudyBlock[] = [];
     let remaining = availableMinutes;
+    const dayCtx: AllocatorContext = {
+      lastWeekCasesMinutes: lastWeekCases,
+      lastWeekProgrammingMinutes: lastWeekProg,
+      thisWeekTheory,
+      thisWeekCases,
+      thisWeekProg,
+      weekRemainingMinutes: Math.max(
+        0,
+        (weeklyAvailability.get(weekStart) ?? 0) - (thisWeekTheory + thisWeekCases + thisWeekProg)
+      ),
+      weekIndex,
+      studyThemeTodayUnit: null,
+      studyThemeTodayMinutes: 0,
+      availableMinutesToday: availableMinutes,
+    };
+
+    function updateDayCtxWeek(): void {
+      dayCtx.thisWeekTheory = thisWeekTheory;
+      dayCtx.thisWeekCases = thisWeekCases;
+      dayCtx.thisWeekProg = thisWeekProg;
+      dayCtx.weekRemainingMinutes = Math.max(
+        0,
+        (weeklyAvailability.get(weekStart) ?? 0) - (thisWeekTheory + thisWeekCases + thisWeekProg)
+      );
+    }
 
     if (remaining >= 60) {
       while (remaining >= 60) {
-        const act = selectActivityWithSmoothing(budget, buildCtx());
+        updateDayCtxWeek();
+        const act = selectActivityWithSmoothing(budget, dayCtx);
         if (!act) break;
         const dur = Math.min(MAX_BLOCK_DURATION, remaining);
-        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
         const raw = mapActivityToBlock(act, dur, unit);
         blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
-        updateGlobalBudget(budget, act, dur);
+        updateGlobalBudget(budget, act, dur, unit, dayCtx);
         remaining -= dur;
         const stream = activityStream(act);
         if (stream === "theory") {
           theoryScheduled += dur;
           thisWeekTheory += dur;
+          if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + dur;
         } else if (stream === "cases") {
           casesScheduled += dur;
           thisWeekCases += dur;
@@ -206,16 +219,18 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
         }
       }
       if (remaining >= 15) {
-        const act = selectActivityWithSmoothing(budget, buildCtx());
+        updateDayCtxWeek();
+        const act = selectActivityWithSmoothing(budget, dayCtx);
         if (act) {
-          const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+          const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
           const raw = mapActivityToBlock(act, remaining, unit);
           blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
-          updateGlobalBudget(budget, act, remaining);
+          updateGlobalBudget(budget, act, remaining, unit, dayCtx);
           const stream = activityStream(act);
           if (stream === "theory") {
             theoryScheduled += remaining;
             thisWeekTheory += remaining;
+            if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + remaining;
           } else if (stream === "cases") {
             casesScheduled += remaining;
             thisWeekCases += remaining;
@@ -227,16 +242,18 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
         }
       }
     } else {
-      const act = selectActivityWithSmoothing(budget, buildCtx());
+      updateDayCtxWeek();
+      const act = selectActivityWithSmoothing(budget, dayCtx);
       if (act) {
-        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget) : null;
+        const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
         const raw = mapActivityToBlock(act, remaining, unit);
         blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
-        updateGlobalBudget(budget, act, remaining);
+        updateGlobalBudget(budget, act, remaining, unit, dayCtx);
         const stream = activityStream(act);
         if (stream === "theory") {
           theoryScheduled += remaining;
           thisWeekTheory += remaining;
+          if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + remaining;
         } else if (stream === "cases") {
           casesScheduled += remaining;
           thisWeekCases += remaining;

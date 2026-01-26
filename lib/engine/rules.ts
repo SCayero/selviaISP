@@ -56,6 +56,8 @@ export const THEORY_ENVELOPE_MINUTES = 510;
  * Per-unit theory activity durations (within 510m envelope)
  */
 export const STUDY_THEME_MINUTES = 240;   // must be first per unit
+export const START_NEXT_UNIT_THRESHOLD = 120;   // Unit N+1 eligible after Unit N has >=120m STUDY_THEME
+export const STUDY_THEME_COMPLETE_THRESHOLD = 240; // REVIEW unlocks after this
 export const REVIEW_MINUTES = 60;
 export const PODCAST_MINUTES = 60;
 export const FLASHCARD_MINUTES = 60;
