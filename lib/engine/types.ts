@@ -60,6 +60,8 @@ export interface SelviaPhaseDefinition {
  * Study block within a day
  */
 export interface StudyBlock {
+  /** Deterministic block identifier: dateISO__index__activity__unit (optional for backward compat) */
+  id?: string;
   selviaPhase: SelviaPhase;
   type: BlockType;
   unit: string | null; // Unit name like "Unidad 1", or null for general blocks
@@ -176,4 +178,19 @@ export interface DiagnosticSchedule {
   diagnosticDays: number[]; // Day indices (0-based) when diagnostics run
   totalDiagnosticDays: number; // 3-5 days depending on availability
 }
+
+/**
+ * Re-export state types for feedback-driven replanning
+ */
+export type {
+  StudentState,
+  UnitState,
+  UnitMinutes,
+  GlobalState,
+  SlackInfo,
+  FeedbackEvent,
+  QuizResultEvent,
+  BlockCompletedEvent,
+  FeedbackEventType,
+} from "./state";
 

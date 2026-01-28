@@ -7,6 +7,8 @@ export interface GroupedBlock {
   mergedFromCount: number;
   originalBlockIndices: number[];
   displayNotes: string;
+  /** First block's id (optional; matches StudyBlock.id) */
+  id?: string;
   // Keep first block's metadata for rendering
   selviaPhase: SelviaPhase;
   type: BlockType;
@@ -69,6 +71,7 @@ export function groupConsecutiveBlocks(blocks: StudyBlock[]): GroupedBlock[] {
       mergedFromCount: 1,
       originalBlockIndices: [i],
       displayNotes: block.notes || "",
+      id: block.id,
       selviaPhase: block.selviaPhase,
       type: block.type,
       format: block.format,

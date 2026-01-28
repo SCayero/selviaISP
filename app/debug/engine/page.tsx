@@ -1,8 +1,10 @@
 "use client";
 
 import { useState, useMemo, useEffect, useCallback } from "react";
-import { generatePlan } from "@/lib/engine/generator";
-import type { FormInputs, Plan, Stage, WeeklyActual } from "@/lib/engine/types";
+import { generatePlan, generatePlanFromState } from "@/lib/engine/generator";
+import { calculateCapacity } from "@/lib/engine/capacity";
+import { deriveInitialState, applyFeedbackEvents } from "@/lib/engine/state";
+import type { FormInputs, Plan, Stage, WeeklyActual, FeedbackEvent, StudentState } from "@/lib/engine/types";
 import { groupConsecutiveBlocks } from "@/lib/ui/groupBlocks";
 
 const STORAGE_KEY = "selvia-debug-engine-inputs-v1";
@@ -44,10 +46,17 @@ function parseStored(stored: unknown): Partial<DebugInputs> | null {
   return out as Partial<DebugInputs>;
 }
 
+/** Sample feedback events for testing feedback mode */
+const SAMPLE_FEEDBACK_EVENTS: FeedbackEvent[] = [
+  { type: "QUIZ_RESULT", dateISO: "2026-01-25", unit: "Unidad 1", score: 45 },
+];
+
 export default function EngineDebugPage() {
   const [inputs, setInputs] = useState<DebugInputs>(DEFAULT_DEBUG_INPUTS);
   const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
   const [initialized, setInitialized] = useState(false);
+  const [feedbackMode, setFeedbackMode] = useState(false);
+  const [blockCompletedMode, setBlockCompletedMode] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -95,10 +104,44 @@ export default function EngineDebugPage() {
     setValidationWarnings(warnings);
   }, [inputs]);
 
-  const plan = useMemo(() => {
+  const { plan, studentState, baselineState } = useMemo(() => {
     const { pinnedToday, ...formInputs } = inputs;
-    return generatePlan(formInputs, { todayISO: pinnedToday });
-  }, [inputs]);
+    const capacity = calculateCapacity(formInputs, { todayISO: pinnedToday });
+    let state = deriveInitialState(formInputs, capacity, pinnedToday);
+    const baseState = state;
+
+    if (blockCompletedMode) {
+      const baselinePlan = generatePlanFromState(formInputs, state, { todayISO: pinnedToday });
+      let block: { id: string; unit: string | null; activity: string; date: string } | null = null;
+      for (const day of baselinePlan.days) {
+        for (const b of day.blocks) {
+          if (b.activity === "STUDY_THEME" && b.unit === "Unidad 1") {
+            block = { id: b.id!, unit: b.unit, activity: b.activity, date: day.date };
+            break;
+          }
+        }
+        if (block) break;
+      }
+      if (block) {
+        const events: FeedbackEvent[] = [
+          {
+            type: "BLOCK_COMPLETED",
+            dateISO: block.date,
+            blockId: block.id,
+            activity: "STUDY_THEME",
+            unit: block.unit,
+            completedMinutes: 120,
+          },
+        ];
+        state = applyFeedbackEvents(state, events);
+      }
+    } else if (feedbackMode) {
+      state = applyFeedbackEvents(state, SAMPLE_FEEDBACK_EVENTS);
+    }
+
+    const generatedPlan = generatePlanFromState(formInputs, state, { todayISO: pinnedToday });
+    return { plan: generatedPlan, studentState: state, baselineState: baseState };
+  }, [inputs, feedbackMode, blockCompletedMode]);
 
   const sanitizedPlan = useMemo(() => {
     const sanitized = JSON.parse(JSON.stringify(plan)) as Plan;
@@ -203,6 +246,57 @@ export default function EngineDebugPage() {
               </button>
             </div>
           </div>
+
+          <div className="mb-4 flex flex-wrap items-center gap-4">
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={feedbackMode}
+                onChange={(e) => setFeedbackMode(e.target.checked)}
+                className="h-4 w-4 rounded border-border"
+                disabled={blockCompletedMode}
+              />
+              <span className="text-text">Apply sample feedback events</span>
+            </label>
+            {feedbackMode && !blockCompletedMode && (
+              <span className="text-xs text-muted">
+                (QUIZ_RESULT: Unidad 1, score=45)
+              </span>
+            )}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={blockCompletedMode}
+                onChange={(e) => setBlockCompletedMode(e.target.checked)}
+                className="h-4 w-4 rounded border-border"
+                disabled={feedbackMode}
+              />
+              <span className="text-text">Apply sample BLOCK_COMPLETED</span>
+            </label>
+            {blockCompletedMode && (
+              <span className="text-xs text-muted">
+                (first STUDY_THEME Unidad 1 → 120m done, replan)
+              </span>
+            )}
+          </div>
+
+          {blockCompletedMode && (
+            <div className="mb-4 rounded border border-border bg-bg p-3 text-sm">
+              <div className="mb-2 font-semibold text-text">BLOCK_COMPLETED before / after</div>
+              <div className="grid gap-2 font-mono text-xs sm:grid-cols-2">
+                <div>
+                  <span className="text-muted">Unidad 1 done.studyTheme:</span>{" "}
+                  {baselineState.units["Unidad 1"]?.done.studyTheme ?? 0}m →{" "}
+                  {studentState.units["Unidad 1"]?.done.studyTheme ?? 0}m
+                </div>
+                <div>
+                  <span className="text-muted">slackRatio:</span>{" "}
+                  {(baselineState.slack.slackRatio * 100).toFixed(1)}% →{" "}
+                  {(studentState.slack.slackRatio * 100).toFixed(1)}%
+                </div>
+              </div>
+            </div>
+          )}
 
           {validationWarnings.length > 0 && (
             <div className="mb-4 rounded border border-amber-500 bg-amber-500/10 p-3 text-sm text-amber-800 dark:text-amber-200">
@@ -408,6 +502,14 @@ export default function EngineDebugPage() {
                     {(cap.bufferRatio * 100).toFixed(1)}% — <span className={cap.bufferStatus === "good" ? "text-green-600" : cap.bufferStatus === "edge" ? "text-amber-600" : "text-red-600"}>{cap.bufferStatus}</span>
                   </div>
                 </div>
+                <div className="rounded bg-bg px-3 py-2">
+                  <div className="text-xs text-muted" style={{ fontWeight: 400 }}>Slack (State)</div>
+                  <div className="font-bold text-text" style={{ fontWeight: 600 }}>{studentState.slack.slackMinutes.toLocaleString()}m</div>
+                  <div className="text-xs text-muted" style={{ fontWeight: 400 }}>
+                    {(studentState.slack.slackRatio * 100).toFixed(1)}% — <span className={studentState.slack.status === "good" ? "text-green-600" : studentState.slack.status === "edge" ? "text-amber-600" : "text-red-600"}>{studentState.slack.status}</span>
+                    {feedbackMode && <span className="ml-1 text-accent">(feedback applied)</span>}
+                  </div>
+                </div>
               </div>
             </div>
           )}
@@ -563,6 +665,11 @@ export default function EngineDebugPage() {
                               {groupedBlock.mergedFromCount > 1 && (
                                 <code className="rounded bg-accent px-1.5 py-0.5 text-text" style={{ fontWeight: 600 }}>
                                   {groupedBlock.mergedFromCount} blocks merged
+                                </code>
+                              )}
+                              {groupedBlock.id && (
+                                <code className="rounded bg-bg px-1.5 py-0.5 font-mono text-muted" title="Block id (first in group)">
+                                  {groupedBlock.id}
                                 </code>
                               )}
                             </div>

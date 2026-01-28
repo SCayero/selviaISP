@@ -1,6 +1,17 @@
 /**
  * Selvia Method V0 - Core Plan Generator (Pass 1)
  * Uses capacity + global remaining-ratio allocator. No weekly budgets or unlocks.
+ *
+ * Architecture:
+ * - generatePlan: backward-compatible wrapper (derives initial state, then calls generatePlanFromState)
+ * - generatePlanFromState: core generator that consumes StudentState
+ * - createBudgetFromState: converts StudentState to GlobalBudget for allocator
+ *
+ * Activation/gating:
+ * - Based on SCHEDULED progress within the current generation pass
+ * - GlobalBudget.unitTheoryRemaining[k].studyThemeDone tracks scheduled-so-far (starts from state.done)
+ * - Allocator increments studyThemeDone as blocks are scheduled
+ * - Pass 1: state.done is 0, so activation is purely based on what's scheduled in this run
  */
 
 import type {
@@ -12,23 +23,26 @@ import type {
   ActivityType,
   WeeklyActual,
   GeneratorOptions,
+  StudentState,
+  PlanCapacity,
 } from "./types";
 import {
   MAX_BLOCK_DURATION,
-  MIN_BLOCK_DURATION,
   PHASE_DEFINITIONS,
+  THEORY_ENVELOPE_MINUTES,
 } from "./rules";
 import { getTodayISO, addDays, getWeekday, diffDays, getWeekStart, getNowISO } from "../utils/date";
 import { calculateCapacity } from "./capacity";
 import {
-  createGlobalBudget,
   selectActivityWithSmoothing,
   updateGlobalBudget,
   getCurrentUnitKey,
   WEEKLY_MINIMUM_MINUTES,
   type AllocatorContext,
+  type GlobalBudget,
 } from "./allocator";
 import { generateExplanations } from "./explain";
+import { deriveInitialState } from "./state";
 
 function availabilityIndex(weekday: number): number {
   return weekday === 0 ? 6 : weekday - 1;
@@ -78,12 +92,96 @@ function mapActivityToBlock(
   }
 }
 
-export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Plan {
-  const today = options?.todayISO ?? getTodayISO();
+function generateBlockId(
+  dateISO: string,
+  index: number,
+  activity: ActivityType,
+  unit: string | null
+): string {
+  return `${dateISO}__${index}__${activity}__${unit ?? "NA"}`;
+}
+
+/**
+ * Convert StudentState to GlobalBudget for allocator.
+ *
+ * - remaining = required - done (represents what still needs to be scheduled)
+ * - studyThemeDone is initialized from state.done.studyTheme (0 in Pass 1)
+ * - The allocator increments studyThemeDone as blocks are scheduled
+ * - Activation/gating is based on scheduled-so-far, not historical done
+ */
+export function createBudgetFromState(state: StudentState): GlobalBudget {
+  const unitTheoryRemaining: GlobalBudget["unitTheoryRemaining"] = {};
+
+  // Sum up theory planned from required
+  let theoryPlanned = 0;
+
+  for (const [unitId, unitState] of Object.entries(state.units)) {
+    const req = unitState.required;
+    const done = unitState.done;
+
+    // Remaining = required - done
+    const studyThemeRemaining = Math.max(0, req.studyTheme - done.studyTheme);
+    const reviewRemaining = Math.max(0, req.review - done.review);
+    const podcastRemaining = Math.max(0, req.podcast - done.podcast);
+    const flashcardRemaining = Math.max(0, req.flashcard - done.flashcard);
+    const quizRemaining = Math.max(0, req.quiz - done.quiz);
+    const totalRemaining = studyThemeRemaining + reviewRemaining + podcastRemaining + flashcardRemaining + quizRemaining;
+
+    unitTheoryRemaining[unitId] = {
+      studyThemeRemaining,
+      studyThemeDone: done.studyTheme, // Starts from historical done (0 in Pass 1)
+      reviewRemaining,
+      podcastRemaining,
+      flashcardRemaining,
+      quizRemaining,
+      totalRemaining,
+      studyThemeComplete: done.studyTheme >= 240, // Based on done, not scheduled-so-far
+    };
+
+    // Theory planned is sum of all unit theory requirements
+    theoryPlanned += req.studyTheme + req.review + req.podcast + req.flashcard + req.quiz;
+  }
+
+  // Global theory remaining is sum of all unit remaining
+  let theoryRemaining = 0;
+  for (const unit of Object.values(unitTheoryRemaining)) {
+    theoryRemaining += unit.totalRemaining;
+  }
+
+  const casesPlanned = state.global.casesRequired;
+  const programmingPlanned = state.global.programmingRequired;
+  const casesRemaining = Math.max(0, casesPlanned - state.global.casesDone);
+  const programmingRemaining = Math.max(0, programmingPlanned - state.global.programmingDone);
+
+  return {
+    theoryPlanned,
+    casesPlanned,
+    programmingPlanned,
+    theoryRemaining,
+    casesRemaining,
+    programmingRemaining,
+    casePracticeScheduled: 0,
+    caseMockScheduled: 0,
+    unitTheoryRemaining,
+  };
+}
+
+/**
+ * Generate plan from StudentState.
+ *
+ * Core generator that consumes StudentState and produces a Plan.
+ * Activation/gating is based on scheduled-so-far (tracked in GlobalBudget.studyThemeDone).
+ */
+export function generatePlanFromState(
+  inputs: FormInputs,
+  state: StudentState,
+  options?: GeneratorOptions
+): Plan {
+  const today = options?.todayISO ?? state.meta.todayISO;
   const examDate = inputs.examDate;
   const totalDays = diffDays(today, examDate);
   const capacity = calculateCapacity(inputs, { todayISO: today });
-  const budget = createGlobalBudget(capacity);
+  const budget = createBudgetFromState(state);
 
   const days: DayPlan[] = [];
   const weeklyActuals: WeeklyActual[] = [];
@@ -167,6 +265,7 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
     }
 
     const blocks: StudyBlock[] = [];
+    let blockIndex = 0;
     let remaining = availableMinutes;
     const dayCtx: AllocatorContext = {
       lastWeekCasesMinutes: lastWeekCases,
@@ -202,7 +301,8 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
         const dur = Math.min(MAX_BLOCK_DURATION, remaining);
         const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
         const raw = mapActivityToBlock(act, dur, unit);
-        blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+        const id = generateBlockId(date, blockIndex++, act, unit);
+        blocks.push({ ...raw, id, notes: `${act}${unit ? ` – ${unit}` : ""}` });
         updateGlobalBudget(budget, act, dur, unit, dayCtx);
         remaining -= dur;
         const stream = activityStream(act);
@@ -224,7 +324,8 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
         if (act) {
           const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
           const raw = mapActivityToBlock(act, remaining, unit);
-          blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+          const id = generateBlockId(date, blockIndex++, act, unit);
+          blocks.push({ ...raw, id, notes: `${act}${unit ? ` – ${unit}` : ""}` });
           updateGlobalBudget(budget, act, remaining, unit, dayCtx);
           const stream = activityStream(act);
           if (stream === "theory") {
@@ -247,7 +348,8 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
       if (act) {
         const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
         const raw = mapActivityToBlock(act, remaining, unit);
-        blocks.push({ ...raw, notes: `${act}${unit ? ` – ${unit}` : ""}` });
+        const id = generateBlockId(date, blockIndex++, act, unit);
+        blocks.push({ ...raw, id, notes: `${act}${unit ? ` – ${unit}` : ""}` });
         updateGlobalBudget(budget, act, remaining, unit, dayCtx);
         const stream = activityStream(act);
         if (stream === "theory") {
@@ -343,4 +445,17 @@ export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Pl
   };
   plan.explanations = generateExplanations(plan, inputs);
   return plan;
+}
+
+/**
+ * Generate plan from form inputs (backward-compatible wrapper).
+ *
+ * Derives initial StudentState from inputs, then calls generatePlanFromState.
+ * All existing tests and callers continue to work without changes.
+ */
+export function generatePlan(inputs: FormInputs, options?: GeneratorOptions): Plan {
+  const today = options?.todayISO ?? getTodayISO();
+  const capacity = calculateCapacity(inputs, { todayISO: today });
+  const state = deriveInitialState(inputs, capacity, today);
+  return generatePlanFromState(inputs, state, options);
 }
