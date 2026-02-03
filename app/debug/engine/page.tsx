@@ -57,6 +57,7 @@ export default function EngineDebugPage() {
   const [initialized, setInitialized] = useState(false);
   const [feedbackMode, setFeedbackMode] = useState(false);
   const [blockCompletedMode, setBlockCompletedMode] = useState(false);
+  const [sessionFeedbackMode, setSessionFeedbackMode] = useState(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -137,11 +138,21 @@ export default function EngineDebugPage() {
       }
     } else if (feedbackMode) {
       state = applyFeedbackEvents(state, SAMPLE_FEEDBACK_EVENTS);
+    } else if (sessionFeedbackMode) {
+      state = applyFeedbackEvents(state, [
+        {
+          type: "SESSION_FEEDBACK",
+          dateISO: pinnedToday,
+          blockId: "debug",
+          activity: "STUDY_THEME",
+          feel: "too_much",
+        },
+      ]);
     }
 
     const generatedPlan = generatePlanFromState(formInputs, state, { todayISO: pinnedToday });
     return { plan: generatedPlan, studentState: state, baselineState: baseState };
-  }, [inputs, feedbackMode, blockCompletedMode]);
+  }, [inputs, feedbackMode, blockCompletedMode, sessionFeedbackMode]);
 
   const sanitizedPlan = useMemo(() => {
     const sanitized = JSON.parse(JSON.stringify(plan)) as Plan;
@@ -254,11 +265,11 @@ export default function EngineDebugPage() {
                 checked={feedbackMode}
                 onChange={(e) => setFeedbackMode(e.target.checked)}
                 className="h-4 w-4 rounded border-border"
-                disabled={blockCompletedMode}
+                disabled={blockCompletedMode || sessionFeedbackMode}
               />
               <span className="text-text">Apply sample feedback events</span>
             </label>
-            {feedbackMode && !blockCompletedMode && (
+            {feedbackMode && !blockCompletedMode && !sessionFeedbackMode && (
               <span className="text-xs text-muted">
                 (QUIZ_RESULT: Unidad 1, score=45)
               </span>
@@ -269,13 +280,28 @@ export default function EngineDebugPage() {
                 checked={blockCompletedMode}
                 onChange={(e) => setBlockCompletedMode(e.target.checked)}
                 className="h-4 w-4 rounded border-border"
-                disabled={feedbackMode}
+                disabled={feedbackMode || sessionFeedbackMode}
               />
               <span className="text-text">Apply sample BLOCK_COMPLETED</span>
             </label>
             {blockCompletedMode && (
               <span className="text-xs text-muted">
                 (first STUDY_THEME Unidad 1 → 120m done, replan)
+              </span>
+            )}
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={sessionFeedbackMode}
+                onChange={(e) => setSessionFeedbackMode(e.target.checked)}
+                className="h-4 w-4 rounded border-border"
+                disabled={feedbackMode || blockCompletedMode}
+              />
+              <span className="text-text">Apply sample SESSION_FEEDBACK</span>
+            </label>
+            {sessionFeedbackMode && (
+              <span className="text-xs text-muted">
+                (STUDY_THEME too_much → shorter blocks)
               </span>
             )}
           </div>
@@ -293,6 +319,30 @@ export default function EngineDebugPage() {
                   <span className="text-muted">slackRatio:</span>{" "}
                   {(baselineState.slack.slackRatio * 100).toFixed(1)}% →{" "}
                   {(studentState.slack.slackRatio * 100).toFixed(1)}%
+                </div>
+              </div>
+            </div>
+          )}
+
+          {sessionFeedbackMode && (
+            <div className="mb-4 rounded border border-border bg-bg p-3 text-sm">
+              <div className="mb-2 font-semibold text-text">SESSION_FEEDBACK before / after</div>
+              <div className="grid gap-2 font-mono text-xs sm:grid-cols-2">
+                <div>
+                  <span className="text-muted">prefs.targetMinutesByActivity.STUDY_THEME:</span>{" "}
+                  {baselineState.prefs.targetMinutesByActivity.STUDY_THEME}m →{" "}
+                  {studentState.prefs.targetMinutesByActivity.STUDY_THEME}m
+                </div>
+                <div>
+                  <span className="text-muted">First STUDY_THEME block (plan):</span>{" "}
+                  {(() => {
+                    for (const day of plan.days) {
+                      for (const b of day.blocks) {
+                        if (b.activity === "STUDY_THEME") return `${b.durationMinutes}m`;
+                      }
+                    }
+                    return "—";
+                  })()}
                 </div>
               </div>
             </div>
@@ -448,6 +498,34 @@ export default function EngineDebugPage() {
               Copy share link
             </button>
           </div>
+
+          <details className="mt-4">
+            <summary className="cursor-pointer text-sm font-semibold text-text">
+              API curl example
+            </summary>
+            <pre className="mt-2 overflow-x-auto rounded bg-bg p-3 text-xs font-mono text-text">
+              {`curl -X POST ${typeof window !== "undefined" ? window.location.origin : "http://localhost:3000"}/api/v1/plan \\
+  -H "Content-Type: application/json" \\
+  -H "x-selvia-api-key: YOUR_KEY" \\
+  -d '${JSON.stringify(
+                {
+                  todayISO: inputs.pinnedToday,
+                  inputs: {
+                    examDate: inputs.examDate,
+                    availabilityHoursByWeekday: inputs.availabilityHoursByWeekday,
+                    presentedBefore: inputs.presentedBefore,
+                    alreadyStudying: inputs.alreadyStudying,
+                    region: inputs.region,
+                    stage: inputs.stage,
+                    themesCount: inputs.themesCount,
+                    planProgramming: inputs.planProgramming,
+                  },
+                },
+                null,
+                2
+              )}'`}
+            </pre>
+          </details>
         </div>
 
         <div className="mb-6 rounded-lg border border-border bg-card p-4 shadow-soft">

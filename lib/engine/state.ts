@@ -81,14 +81,14 @@ export interface StudentState {
   units: Record<string, UnitState>;
   global: GlobalState;
   slack: SlackInfo;
+  prefs: {
+    targetMinutesByActivity: Record<ActivityType, number>;
+  };
 }
 
 // ============================================================================
 // Feedback Events
 // ============================================================================
-
-/** Feedback event types */
-export type FeedbackEventType = "QUIZ_RESULT" | "BLOCK_COMPLETED";
 
 /** Quiz result feedback event */
 export interface QuizResultEvent {
@@ -109,7 +109,21 @@ export interface BlockCompletedEvent {
   completedMinutes: number;
 }
 
-export type FeedbackEvent = QuizResultEvent | BlockCompletedEvent;
+export type SessionFeel = "too_much" | "ok" | "more";
+
+/** Session feedback event (chunk-size adjustment for future blocks of same activity) */
+export interface SessionFeedbackEvent {
+  type: "SESSION_FEEDBACK";
+  dateISO: string;
+  blockId: string;
+  activity: ActivityType;
+  feel: SessionFeel;
+}
+
+/** Feedback event types */
+export type FeedbackEventType = "QUIZ_RESULT" | "BLOCK_COMPLETED" | "SESSION_FEEDBACK";
+
+export type FeedbackEvent = QuizResultEvent | BlockCompletedEvent | SessionFeedbackEvent;
 
 // ============================================================================
 // Constants
@@ -120,6 +134,32 @@ export const QUIZ_FAIL_THRESHOLD = 60;
 
 /** Additional review minutes added when quiz fails */
 export const REVIEW_BOOST_MINUTES = 30;
+
+/** Default target block duration (minutes) per activity for chunk sizing */
+export const ACTIVITY_TARGET_DEFAULTS: Record<ActivityType, number> = {
+  STUDY_THEME: 60,
+  REVIEW: 30,
+  PODCAST: 60,
+  FLASHCARD: 30,
+  QUIZ: 15,
+  CASE_PRACTICE: 60,
+  CASE_MOCK: 60,
+  PROGRAMMING_BLOCK: 60,
+};
+
+/** Min/max bounds for target block duration per activity */
+export const ACTIVITY_BOUNDS: Record<ActivityType, { min: number; max: number }> = {
+  STUDY_THEME: { min: 30, max: 90 },
+  REVIEW: { min: 15, max: 60 },
+  PODCAST: { min: 30, max: 90 },
+  FLASHCARD: { min: 15, max: 60 },
+  QUIZ: { min: 10, max: 30 },
+  CASE_PRACTICE: { min: 30, max: 90 },
+  CASE_MOCK: { min: 30, max: 90 },
+  PROGRAMMING_BLOCK: { min: 30, max: 90 },
+};
+
+export const SESSION_FEEDBACK_STEP = 15;
 
 // ============================================================================
 // Functions
@@ -236,6 +276,9 @@ export function deriveInitialState(
       slackRatio: 0,
       status: "warning",
     },
+    prefs: {
+      targetMinutesByActivity: { ...ACTIVITY_TARGET_DEFAULTS },
+    },
   };
 
   const requiredTotal = computeTotalRequired(partialState);
@@ -316,6 +359,22 @@ export function applyFeedbackEvents(
       } else if (activity === "PROGRAMMING_BLOCK") {
         newState.global.programmingDone += minutes;
       }
+    } else if (event.type === "SESSION_FEEDBACK") {
+      const { activity, feel } = event;
+      const current = newState.prefs.targetMinutesByActivity[activity];
+      const bounds = ACTIVITY_BOUNDS[activity];
+      let newTarget = current;
+
+      if (feel === "too_much") {
+        newTarget = current - SESSION_FEEDBACK_STEP;
+      } else if (feel === "more") {
+        newTarget = current + SESSION_FEEDBACK_STEP;
+      }
+
+      newState.prefs.targetMinutesByActivity[activity] = Math.max(
+        bounds.min,
+        Math.min(bounds.max, newTarget)
+      );
     }
   }
 

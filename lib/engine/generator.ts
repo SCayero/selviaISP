@@ -182,6 +182,7 @@ export function generatePlanFromState(
   const totalDays = diffDays(today, examDate);
   const capacity = calculateCapacity(inputs, { todayISO: today });
   const budget = createBudgetFromState(state);
+  const targetMinutes = state.prefs.targetMinutesByActivity;
 
   const days: DayPlan[] = [];
   const weeklyActuals: WeeklyActual[] = [];
@@ -298,7 +299,8 @@ export function generatePlanFromState(
         updateDayCtxWeek();
         const act = selectActivityWithSmoothing(budget, dayCtx);
         if (!act) break;
-        const dur = Math.min(MAX_BLOCK_DURATION, remaining);
+        const activityTarget = targetMinutes[act] ?? MAX_BLOCK_DURATION;
+        const dur = Math.min(activityTarget, remaining);
         const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
         const raw = mapActivityToBlock(act, dur, unit);
         const id = generateBlockId(date, blockIndex++, act, unit);
@@ -323,23 +325,25 @@ export function generatePlanFromState(
         const act = selectActivityWithSmoothing(budget, dayCtx);
         if (act) {
           const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
-          const raw = mapActivityToBlock(act, remaining, unit);
+          const activityTarget = targetMinutes[act] ?? MAX_BLOCK_DURATION;
+          const dur = Math.min(activityTarget, remaining);
+          const raw = mapActivityToBlock(act, dur, unit);
           const id = generateBlockId(date, blockIndex++, act, unit);
           blocks.push({ ...raw, id, notes: `${act}${unit ? ` – ${unit}` : ""}` });
-          updateGlobalBudget(budget, act, remaining, unit, dayCtx);
+          updateGlobalBudget(budget, act, dur, unit, dayCtx);
           const stream = activityStream(act);
           if (stream === "theory") {
-            theoryScheduled += remaining;
-            thisWeekTheory += remaining;
-            if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + remaining;
+            theoryScheduled += dur;
+            thisWeekTheory += dur;
+            if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + dur;
           } else if (stream === "cases") {
-            casesScheduled += remaining;
-            thisWeekCases += remaining;
+            casesScheduled += dur;
+            thisWeekCases += dur;
           } else {
-            programmingScheduled += remaining;
-            thisWeekProg += remaining;
+            programmingScheduled += dur;
+            thisWeekProg += dur;
           }
-          remaining = 0;
+          remaining -= dur;
         }
       }
     } else {
@@ -347,21 +351,23 @@ export function generatePlanFromState(
       const act = selectActivityWithSmoothing(budget, dayCtx);
       if (act) {
         const unit = activityStream(act) === "theory" ? getCurrentUnitKey(budget, dayCtx) : null;
-        const raw = mapActivityToBlock(act, remaining, unit);
+        const activityTarget = targetMinutes[act] ?? MAX_BLOCK_DURATION;
+        const dur = Math.min(activityTarget, remaining);
+        const raw = mapActivityToBlock(act, dur, unit);
         const id = generateBlockId(date, blockIndex++, act, unit);
         blocks.push({ ...raw, id, notes: `${act}${unit ? ` – ${unit}` : ""}` });
-        updateGlobalBudget(budget, act, remaining, unit, dayCtx);
+        updateGlobalBudget(budget, act, dur, unit, dayCtx);
         const stream = activityStream(act);
         if (stream === "theory") {
-          theoryScheduled += remaining;
-          thisWeekTheory += remaining;
-          if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + remaining;
+          theoryScheduled += dur;
+          thisWeekTheory += dur;
+          if (act === "STUDY_THEME") dayCtx.studyThemeTodayMinutes = (dayCtx.studyThemeTodayMinutes ?? 0) + dur;
         } else if (stream === "cases") {
-          casesScheduled += remaining;
-          thisWeekCases += remaining;
+          casesScheduled += dur;
+          thisWeekCases += dur;
         } else {
-          programmingScheduled += remaining;
-          thisWeekProg += remaining;
+          programmingScheduled += dur;
+          thisWeekProg += dur;
         }
       }
     }

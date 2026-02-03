@@ -6,7 +6,15 @@
 import { describe, it, expect } from "vitest";
 import { generatePlan, generatePlanFromState, createBudgetFromState } from "../generator";
 import { calculateCapacity } from "../capacity";
-import { deriveInitialState, applyFeedbackEvents, QUIZ_FAIL_THRESHOLD, REVIEW_BOOST_MINUTES } from "../state";
+import {
+  deriveInitialState,
+  applyFeedbackEvents,
+  QUIZ_FAIL_THRESHOLD,
+  REVIEW_BOOST_MINUTES,
+  ACTIVITY_TARGET_DEFAULTS,
+  ACTIVITY_BOUNDS,
+  SESSION_FEEDBACK_STEP,
+} from "../state";
 import type { FormInputs, FeedbackEvent } from "../types";
 
 const TEST_TODAY = "2026-01-01";
@@ -60,6 +68,11 @@ describe("StudentState derivation", () => {
     expect(state.global.programmingRequired).toBe(capacity.programmingPlanned);
     expect(state.global.casesDone).toBe(0);
     expect(state.global.programmingDone).toBe(0);
+
+    // Check prefs initialized
+    expect(state.prefs).toBeDefined();
+    expect(state.prefs.targetMinutesByActivity).toBeDefined();
+    expect(state.prefs.targetMinutesByActivity.STUDY_THEME).toBe(ACTIVITY_TARGET_DEFAULTS.STUDY_THEME);
 
     // Check slack is computed correctly
     // effectiveCapacityFuture should equal capacity.availableEffectiveMinutes (excludes final 2 weeks)
@@ -298,6 +311,121 @@ describe("Replanning", () => {
         expect(b1[j].id).toBe(b2[j].id);
       }
     }
+  });
+});
+
+describe("SESSION_FEEDBACK", () => {
+  it("SF-01: too_much decreases target, more increases, ok no-op", () => {
+    const inputs = createInputs();
+    const capacity = calculateCapacity(inputs, { todayISO: TEST_TODAY });
+    const base = deriveInitialState(inputs, capacity, TEST_TODAY);
+    const initial = base.prefs.targetMinutesByActivity.STUDY_THEME;
+
+    const afterTooMuch = applyFeedbackEvents(base, [
+      { type: "SESSION_FEEDBACK", dateISO: TEST_TODAY, blockId: "x", activity: "STUDY_THEME", feel: "too_much" },
+    ]);
+    expect(afterTooMuch.prefs.targetMinutesByActivity.STUDY_THEME).toBe(initial - SESSION_FEEDBACK_STEP);
+
+    const afterMore = applyFeedbackEvents(base, [
+      { type: "SESSION_FEEDBACK", dateISO: TEST_TODAY, blockId: "x", activity: "STUDY_THEME", feel: "more" },
+    ]);
+    expect(afterMore.prefs.targetMinutesByActivity.STUDY_THEME).toBe(initial + SESSION_FEEDBACK_STEP);
+
+    const afterOk = applyFeedbackEvents(base, [
+      { type: "SESSION_FEEDBACK", dateISO: TEST_TODAY, blockId: "x", activity: "STUDY_THEME", feel: "ok" },
+    ]);
+    expect(afterOk.prefs.targetMinutesByActivity.STUDY_THEME).toBe(initial);
+  });
+
+  it("SF-02: only same activity changes", () => {
+    const inputs = createInputs();
+    const capacity = calculateCapacity(inputs, { todayISO: TEST_TODAY });
+    const base = deriveInitialState(inputs, capacity, TEST_TODAY);
+
+    const updated = applyFeedbackEvents(base, [
+      { type: "SESSION_FEEDBACK", dateISO: TEST_TODAY, blockId: "x", activity: "QUIZ", feel: "more" },
+    ]);
+
+    expect(updated.prefs.targetMinutesByActivity.QUIZ).toBe(
+      base.prefs.targetMinutesByActivity.QUIZ + SESSION_FEEDBACK_STEP
+    );
+    expect(updated.prefs.targetMinutesByActivity.STUDY_THEME).toBe(base.prefs.targetMinutesByActivity.STUDY_THEME);
+    expect(updated.prefs.targetMinutesByActivity.REVIEW).toBe(base.prefs.targetMinutesByActivity.REVIEW);
+    expect(updated.prefs.targetMinutesByActivity.PROGRAMMING_BLOCK).toBe(
+      base.prefs.targetMinutesByActivity.PROGRAMMING_BLOCK
+    );
+  });
+
+  it("SF-03: replanning shifts future block durations in expected direction", () => {
+    const inputs = createInputs();
+    const capacity = calculateCapacity(inputs, { todayISO: TEST_TODAY });
+    const base = deriveInitialState(inputs, capacity, TEST_TODAY);
+    const baselinePlan = generatePlanFromState(inputs, base, { todayISO: TEST_TODAY });
+
+    const shorter = applyFeedbackEvents(base, [
+      { type: "SESSION_FEEDBACK", dateISO: TEST_TODAY, blockId: "x", activity: "STUDY_THEME", feel: "too_much" },
+    ]);
+    const planShorter = generatePlanFromState(inputs, shorter, { todayISO: TEST_TODAY });
+
+    function maxStudyThemeBlockMinutes(plan: typeof baselinePlan): number {
+      let max = 0;
+      for (const day of plan.days) {
+        for (const b of day.blocks) {
+          if (b.activity === "STUDY_THEME") max = Math.max(max, b.durationMinutes);
+        }
+      }
+      return max;
+    }
+
+    const baseMax = maxStudyThemeBlockMinutes(baselinePlan);
+    const shorterMax = maxStudyThemeBlockMinutes(planShorter);
+    expect(shorterMax).toBeLessThanOrEqual(baseMax);
+    expect(base.prefs.targetMinutesByActivity.STUDY_THEME).toBeGreaterThan(
+      shorter.prefs.targetMinutesByActivity.STUDY_THEME
+    );
+  });
+
+  it("SF-04: no scheduling before today invariant preserved", () => {
+    const inputs = createInputs();
+    const laterToday = "2026-01-06";
+    const capacity = calculateCapacity(inputs, { todayISO: laterToday });
+    const state = deriveInitialState(inputs, capacity, laterToday);
+    const withFeedback = applyFeedbackEvents(state, [
+      { type: "SESSION_FEEDBACK", dateISO: laterToday, blockId: "x", activity: "STUDY_THEME", feel: "more" },
+    ]);
+
+    const plan = generatePlanFromState(inputs, withFeedback, { todayISO: laterToday });
+    for (const day of plan.days) {
+      expect(day.date >= laterToday).toBe(true);
+    }
+    expect(plan.days[0].date).toBe(laterToday);
+  });
+
+  it("SF-05: bounds enforced", () => {
+    const inputs = createInputs();
+    const capacity = calculateCapacity(inputs, { todayISO: TEST_TODAY });
+    const base = deriveInitialState(inputs, capacity, TEST_TODAY);
+    const bounds = ACTIVITY_BOUNDS.STUDY_THEME;
+
+    const manyTooMuch: FeedbackEvent[] = Array.from({ length: 20 }, () => ({
+      type: "SESSION_FEEDBACK",
+      dateISO: TEST_TODAY,
+      blockId: "x",
+      activity: "STUDY_THEME" as const,
+      feel: "too_much" as const,
+    }));
+    const afterMin = applyFeedbackEvents(base, manyTooMuch);
+    expect(afterMin.prefs.targetMinutesByActivity.STUDY_THEME).toBe(bounds.min);
+
+    const manyMore: FeedbackEvent[] = Array.from({ length: 20 }, () => ({
+      type: "SESSION_FEEDBACK",
+      dateISO: TEST_TODAY,
+      blockId: "x",
+      activity: "STUDY_THEME" as const,
+      feel: "more" as const,
+    }));
+    const afterMax = applyFeedbackEvents(base, manyMore);
+    expect(afterMax.prefs.targetMinutesByActivity.STUDY_THEME).toBe(bounds.max);
   });
 });
 

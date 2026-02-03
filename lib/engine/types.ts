@@ -191,6 +191,8 @@ export type {
   FeedbackEvent,
   QuizResultEvent,
   BlockCompletedEvent,
+  SessionFeedbackEvent,
+  SessionFeel,
   FeedbackEventType,
 } from "./state";
 
